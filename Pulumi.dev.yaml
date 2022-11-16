@@ -1,0 +1,16 @@
+config:
+  aws:region: us-east-1
+  verified:dbhost:
+    secure: AAABAFAq9Z8O7jE2nHqjFl8S72z9Fg1ZkUNrI04PM3MxRRQsgsE0qj+u+yqJg4unT1QLxzeYZ3mF5cpXtMU1/kQN5IYhafRI9AxUYAas5uk2r33z
+  verified:dbname: postgres
+  verified:dbpassword:
+    secure: AAABAPrardDtMPHcfL4cSsl5amQO1nZ7MxMSI9W3UmPd9SEZe0//ZMKlLP0=
+  verified:dbport: "5432"
+  verified:dbuser: postgres
+  verified:maxiterations: "14"
+  verified:querystatus_tn: querystatus
+  verified:tweetstatus_tn: tweetstatus
+  verified:sleeptime: "500"
+  verified:twittertoken:
+    secure: AAABAP7bTyjGkw5eRMeTNkOLAm35u1jR2ZbwZ5lk26j0w/+4XBUH2BpdJaGwfNJY5GQYDq1ky6OYTedhaMkzEM5Kv5nhzx1sYFzabU14Pw2hxxAuca7GFvHDzlxOe+h7VVWSWJj5lEr4vee/PFThHafQgQHI6LwrxUXK3gdzxP6Xn/0ug5zJtALQ0r5+W2azn0W/Jg==
+  verified:verifiedcount_tn: verifiedcount

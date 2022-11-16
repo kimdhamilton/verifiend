@@ -1,0 +1,3 @@
+name: verified
+description: obtains verified following data
+runtime: nodejs
