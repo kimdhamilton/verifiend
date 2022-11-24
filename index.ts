@@ -3,7 +3,7 @@ import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import * as _ from "lodash";
 
-import { getQueryStatus, getTimestampCounts, saveQueryStatus, saveRawCounts } from './pgConnector';
+import { getQueryStatus, getHourlyCounts, saveQueryStatus, saveRawCounts, getDailyCounts } from './pgConnector';
 import { diff } from './tasks';
 import { Followee } from './types';
 import { getResults, getFollowingCount } from './twitterConnector';
@@ -11,26 +11,22 @@ import { QueryInfo, getQueryInfo } from './queryInfo';
 
 const verifiedCounts = new aws.s3.Bucket("verifiedCounts");
 export const verifiedCountsBucket = verifiedCounts.bucket;
-export const latestCountsFileName = 'latest-counts';
+export const hourlyCountsFileName = 'hourly.json';
+export const dailyCountsFileName = 'daily.json';
 
 const verifiedAccounts = new aws.s3.Bucket("verifiedAccounts");
 export const verifiedAccountsBucket = verifiedAccounts.bucket;
-
-const samTweets = new aws.s3.Bucket("samTweets");
-export const samTweetsBucket = samTweets.bucket;
-
-// this lets us write to s3 in reverse chron order
-const MAX_DATETIME = Number(315360000000000);
-
 
 async function fetchFollowing() {
     const queryInfo = getQueryInfo('following', verifiedAccountsBucket.get());
     return fetchAll(queryInfo);
 }
-async function fetchTweets() {
-    const queryInfo = getQueryInfo('tweets', samTweetsBucket.get());
-    return fetchAll(queryInfo);
-}
+
+// experiment / distraction
+const samTweets = new aws.s3.Bucket("samTweets");
+export const samTweetsBucket = samTweets.bucket;
+// end distraction
+
 async function fetchAll(queryInfo: QueryInfo) {
 
     try {
@@ -86,25 +82,14 @@ async function writeToS3(bucket: any, fileName: string, content: any) {
     console.log(`Wrote object to s3 with name: ${fileName}`);
 }
 
-async function readLatestsCounts(bucketName: string) {
+async function readS3FileAsJson(bucketName: string, fileName: string): Promise<any> {
     const s3 = new aws.sdk.S3();
-    // Just need the latest; this works since we write in reverse chron order
-    /*const name = await s3.listObjectsV2({
-        Bucket: bucketName,
-        MaxKeys: 1
-    }).promise();
-    const key = name.Contents?.shift()?.Key;
-    if (!key) {
-        console.error("couldn't find verified counts in s3");
-        return [];
-    }*/
     const obj = await s3.getObject({
         Bucket: bucketName,
-        Key: latestCountsFileName
+        Key: fileName
     }).promise();
     return JSON.parse(obj.Body?.toString('utf-8')!);
 }
-
 
 async function rawCount() {
     const verifiedCount = await getFollowingCount();
@@ -118,21 +103,20 @@ async function rawCount() {
     }
 }
 
+// Dump latest counts to s3
+// 1. Last 3 days hourly
+// 2. Since beginning daily
 async function dumpCountsToS3() {
     try {
-        let timestampCounts = await getTimestampCounts();
+        // get hourly for last 3 days
+        const now = new Date();
+        const threeDaysAgo = new Date().setDate(now.getDate() - 3);
+        let timestampCounts = await getHourlyCounts(threeDaysAgo);
+        await writeToS3(verifiedCountsBucket.get(), hourlyCountsFileName, JSON.stringify(timestampCounts));
 
-        /*
-        const timestampInMs = Number(new Date().getTime());
-        // always write the latest info as the earliest file, because s3 always wants to return ascending
-        const fileNameNumeric = MAX_DATETIME - timestampInMs;
-        const fileName = `${fileNameNumeric}`;
-        await writeToS3(verifiedCountsBucket.get(), fileName, JSON.stringify(timestampCounts));
-        */
-
-        await writeToS3(verifiedCountsBucket.get(), latestCountsFileName, JSON.stringify(timestampCounts));
-
-
+        // get daily averages
+        let dailyCounts = await getDailyCounts();
+        await writeToS3(verifiedCountsBucket.get(), dailyCountsFileName, JSON.stringify(dailyCounts));
     } catch (e: any) {
         console.error(e);
     } finally {
@@ -145,19 +129,8 @@ async function diffBatches(id1: string, id2: string) {
     const f1 = `${id1}-merged`;
     const f2 = `${id2}-merged`;
 
-    const s3 = new aws.sdk.S3();
-    const obj1 = await s3.getObject({
-        Bucket: bucketName,
-        Key: f1
-    }).promise();
-
-    const obj2 = await s3.getObject({
-        Bucket: bucketName,
-        Key: f2
-    }).promise();
-
-    const res1: Followee[] = JSON.parse(obj1.Body?.toString('utf-8')!);
-    const res2: Followee[] = JSON.parse(obj2.Body?.toString('utf-8')!);
+    const res1: Followee[] = await readS3FileAsJson(bucketName, f1);
+    const res2: Followee[] = await readS3FileAsJson(bucketName, f2);
 
     const { deletedValues, addedValues } = diff(res1, res2);
 
@@ -178,11 +151,7 @@ async function mergeBatch(id: string) {
 
     let verified = new Map<string, Followee>();
     for (const f of objs.Contents!) {
-        const obj = await s3.getObject({
-            Bucket: bucketName,
-            Key: f.Key!
-        }).promise();
-        const fileContents: any[] = JSON.parse(obj.Body?.toString('utf-8')!);
+        const fileContents: any[] = await readS3FileAsJson(bucketName, f.Key!);
         fileContents.forEach((obj) => {
             verified.set(obj.id, obj);
         });
@@ -223,11 +192,11 @@ const endpoint = new awsx.apigateway.API("verifiend", {
              localPath: "www",
          },*/
         {
-            path: "/counts",
+            path: "/counts", // TODO: refactor and change this path to daily
             method: "GET",
             eventHandler: async (event) => {
-                console.log(`Getting latest verified counts`);
-                const latest = await readLatestsCounts(verifiedCountsBucket.get());
+                console.log(`Getting daily verified counts, path: ${JSON.stringify, event}`);
+                const latest = await readS3FileAsJson(verifiedCountsBucket.get(), dailyCountsFileName);
                 console.log(`Finished`);
                 return {
                     statusCode: 200,
@@ -239,7 +208,26 @@ const endpoint = new awsx.apigateway.API("verifiend", {
                     body: JSON.stringify(latest),
                 };
             },
-        }],
+        },
+        {
+            path: "/hourly",
+            method: "GET",
+            eventHandler: async (event) => {
+                console.log(`Getting hourly verified counts`);
+                const latest = await readS3FileAsJson(verifiedCountsBucket.get(), hourlyCountsFileName);
+                console.log(`Finished`);
+                return {
+                    statusCode: 200,
+                    headers: {
+                        "Access-Control-Allow-Headers": "Content-Type",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET"
+                    },
+                    body: JSON.stringify(latest),
+                };
+            },
+        }
+    ],
 });
 
 export const restEndpoint = endpoint.url;

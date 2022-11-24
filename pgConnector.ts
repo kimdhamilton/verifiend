@@ -26,7 +26,7 @@ export async function saveRawCounts(verifiedCount: number) {
     await pgclient.end();
 }
 
-export async function getTimestampCounts(): Promise<[]> {
+export async function getHourlyCounts(minDateMilliseconds: number): Promise<[]> {
     const { Client: PGClient } = require("pg");
     const pgclient = new PGClient({
         user: DB_USER,
@@ -36,7 +36,9 @@ export async function getTimestampCounts(): Promise<[]> {
         port: DB_PORT,
     });
     await pgclient.connect();
-    const result = await pgclient.query(`SELECT "timestamp", "count" from ${DB_TABLE_NAME_COUNTS};`);
+
+    const minDateSeconds = minDateMilliseconds / Number(1000.0)
+    const result = await pgclient.query(`SELECT "timestamp", "count" FROM ${DB_TABLE_NAME_COUNTS} WHERE "timestamp" >= to_timestamp(${minDateSeconds}) ;`);
 
     let timestampCounts = [];
     if (result.rows?.length > 0) {
@@ -45,6 +47,29 @@ export async function getTimestampCounts(): Promise<[]> {
     }
     await pgclient.end();
     return timestampCounts;
+}
+
+export async function getDailyCounts(): Promise<[]> {
+    const { Client: PGClient } = require("pg");
+    const pgclient = new PGClient({
+        user: DB_USER,
+        host: DB_HOST,
+        database: DB_NAME,
+        password: DB_PASSWORD,
+        port: DB_PORT,
+    });
+    await pgclient.connect();
+    const result = await pgclient.query(`SELECT date_trunc('day', timestamp) AS "day", AVG(count)::NUMERIC(10,0) AS "count" FROM ${DB_TABLE_NAME_COUNTS} GROUP BY "day" ORDER BY "day" ASC;`);
+
+    let timestampCounts = [];
+    if (result.rows?.length > 0) {
+        console.log(JSON.stringify(result.rows));
+        timestampCounts = result.rows;
+    }
+    await pgclient.end();
+    return timestampCounts;
+
+
 }
 
 export async function getQueryStatus(tableName: string): Promise<Status | undefined> {
