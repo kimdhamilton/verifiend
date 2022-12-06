@@ -1,4 +1,3 @@
-import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import * as _ from "lodash";
@@ -10,16 +9,19 @@ import { getResults, getFollowingCount } from './twitterConnector';
 import { QueryInfo, getQueryInfo } from './queryInfo';
 
 const verifiedCounts = new aws.s3.Bucket("verifiedCounts");
-export const verifiedCountsBucket = verifiedCounts.bucket;
-export const hourlyCountsFileName = 'hourly.json';
-export const dailyCountsFileName = 'daily.json';
+export const VERIFIED_COUNTS_BUCKET = verifiedCounts.bucket;
+export const HOURLY_COUNTS_FILE_NAME = 'hourly.json';
+export const DAILY_COUNTS_FILE_NAME = 'daily.json';
+export const MERGED_SUFFIX = 'merged';
+export const ADDED_SUFFIX = 'added';
+export const DELETED_SUFFIX = 'deleted';
 
 const verifiedAccounts = new aws.s3.Bucket("verifiedAccounts");
 export const verifiedAccountsBucket = verifiedAccounts.bucket;
 
-async function fetchFollowing() {
-    const queryInfo = getQueryInfo('following', verifiedAccountsBucket.get());
-    return fetchAll(queryInfo);
+async function fetchVerifiedAccounts() {
+    const queryInfo = getQueryInfo(verifiedAccountsBucket.get());
+    return pagedFetch(queryInfo);
 }
 
 // experiment / distraction
@@ -27,7 +29,7 @@ const samTweets = new aws.s3.Bucket("samTweets");
 export const samTweetsBucket = samTweets.bucket;
 // end distraction
 
-async function fetchAll(queryInfo: QueryInfo) {
+async function pagedFetch(queryInfo: QueryInfo) {
 
     try {
         const status = await getQueryStatus(queryInfo.getDbTableName());
@@ -56,14 +58,14 @@ async function fetchAll(queryInfo: QueryInfo) {
             const fileName = `${rowId}-${timestampInMs}`;
             await writeToS3(queryInfo.getS3BucketName(), fileName, JSON.stringify(resultsArr));
             if (_.isEmpty(nextToken)) {
-                console.log(`All done! Found ${resultsArr.length} results`);
+                console.log(`All done! Found ${resultsArr.length} results. Merging results`);
+                // TODO: later add retry logic by moving this up to an AWS pipeline
+                await mergeBatch(rowId);
             }
         } else {
             // just log and clean up resources; we'll try again next time
             console.warn('This is either caused by an intermittent error or rate limiting when we got no results. No state to preserve here.');
         }
-
-
     } catch (e: any) {
         console.error(e);
     } finally {
@@ -112,13 +114,14 @@ async function dumpCountsToS3() {
         const now = new Date();
         const threeDaysAgo = new Date().setDate(now.getDate() - 3);
         let timestampCounts = await getHourlyCounts(threeDaysAgo);
-        await writeToS3(verifiedCountsBucket.get(), hourlyCountsFileName, JSON.stringify(timestampCounts));
+        await writeToS3(VERIFIED_COUNTS_BUCKET.get(), HOURLY_COUNTS_FILE_NAME, JSON.stringify(timestampCounts));
 
         // get daily averages
         let dailyCounts = await getDailyCounts();
-        await writeToS3(verifiedCountsBucket.get(), dailyCountsFileName, JSON.stringify(dailyCounts));
+        await writeToS3(VERIFIED_COUNTS_BUCKET.get(), DAILY_COUNTS_FILE_NAME, JSON.stringify(dailyCounts));
     } catch (e: any) {
         console.error(e);
+        // can ignore errors, but log them just in case
     } finally {
         console.log("finished");
     }
@@ -126,16 +129,16 @@ async function dumpCountsToS3() {
 
 async function diffBatches(id1: string, id2: string) {
     const bucketName = verifiedAccountsBucket.get();
-    const f1 = `${id1}-merged`;
-    const f2 = `${id2}-merged`;
+    const f1 = `${id1}-${MERGED_SUFFIX}`;
+    const f2 = `${id2}-${MERGED_SUFFIX}`;
 
     const res1: Followee[] = await readS3FileAsJson(bucketName, f1);
     const res2: Followee[] = await readS3FileAsJson(bucketName, f2);
 
     const { deletedValues, addedValues } = diff(res1, res2);
 
-    await writeToS3(bucketName, `${id1}_${id2}-deleted`, JSON.stringify(deletedValues));
-    await writeToS3(bucketName, `${id1}_${id2}-added`, JSON.stringify(addedValues));
+    await writeToS3(bucketName, `${id1}_${id2}-${DELETED_SUFFIX}`, JSON.stringify(deletedValues));
+    await writeToS3(bucketName, `${id1}_${id2}-${ADDED_SUFFIX}`, JSON.stringify(addedValues));
 }
 
 async function mergeBatch(id: string) {
@@ -157,7 +160,7 @@ async function mergeBatch(id: string) {
         });
     }
     const values = Array.from(verified.values());
-    await writeToS3(bucketName, `${id}-merged`, JSON.stringify(values));
+    await writeToS3(bucketName, `${id}-${MERGED_SUFFIX}`, JSON.stringify(values));
 }
 
 export const mergeHandler = new aws.lambda.CallbackFunction("merge-handler", {
@@ -184,6 +187,36 @@ export const diffHandler = new aws.lambda.CallbackFunction("diff-handler", {
     },
 });
 
+export const backfillMergeHandler = new aws.lambda.CallbackFunction("backfill-merge-handler", {
+    memorySize: 4096,
+    callback: async (ev: any, ctx) => {
+        const minBatchId = Number(ev.minBatchId);
+        const maxBatchId = Number(ev.maxBatchId);
+        console.log(`Merging batches with minBatchId=${minBatchId}, maxBatchId=${maxBatchId}`);
+        for (let batchId = minBatchId; batchId <= maxBatchId; batchId++) {
+            await mergeBatch(batchId.toString());
+        }
+        console.log(`Finished merging batches with minBatchId=${minBatchId}, maxBatchId=${maxBatchId}`);
+        return true;
+    },
+});
+
+
+export const backfillDiffs = new aws.lambda.CallbackFunction("backfill-diff-handler", {
+    memorySize: 4096,
+    callback: async (ev: any, ctx) => {
+        console.log(JSON.stringify(ev));
+        const minBatchId = Number(ev.minBatchId);
+        const maxBatchId = Number(ev.maxBatchId);
+        console.log(`Diffing batches with minBatchId=${minBatchId}, maxBatchId=${maxBatchId}`);
+        for (let batchId = minBatchId; batchId < maxBatchId; batchId++) {
+            await diffBatches(batchId.toString(), (batchId + 1).toString());
+        }
+        console.log(`Fininshed diffing batches with minBatchId=${minBatchId}, maxBatchId=${maxBatchId}`);
+        return true;
+    },
+});
+
 // Create an API endpoint
 const endpoint = new awsx.apigateway.API("verifiend", {
     routes: [
@@ -196,7 +229,7 @@ const endpoint = new awsx.apigateway.API("verifiend", {
             method: "GET",
             eventHandler: async (event) => {
                 console.log(`Getting daily verified counts, path: ${JSON.stringify, event}`);
-                const latest = await readS3FileAsJson(verifiedCountsBucket.get(), dailyCountsFileName);
+                const latest = await readS3FileAsJson(VERIFIED_COUNTS_BUCKET.get(), DAILY_COUNTS_FILE_NAME);
                 console.log(`Finished`);
                 return {
                     statusCode: 200,
@@ -214,7 +247,7 @@ const endpoint = new awsx.apigateway.API("verifiend", {
             method: "GET",
             eventHandler: async (event) => {
                 console.log(`Getting hourly verified counts`);
-                const latest = await readS3FileAsJson(verifiedCountsBucket.get(), hourlyCountsFileName);
+                const latest = await readS3FileAsJson(VERIFIED_COUNTS_BUCKET.get(), HOURLY_COUNTS_FILE_NAME);
                 console.log(`Finished`);
                 return {
                     statusCode: 200,
@@ -236,6 +269,6 @@ aws.cloudwatch.onSchedule("verified-following-snapshot", "cron(36 * * * ? *)", r
 
 aws.cloudwatch.onSchedule("verified-following-dump-to-s3", "cron(55 * * * ? *)", dumpCountsToS3);
 
-aws.cloudwatch.onSchedule("verified-following-details-snapshot", "cron(0,15,30,45 * ? * * *)", fetchFollowing);
+aws.cloudwatch.onSchedule("verified-following-details-snapshot", "cron(0,15,30,45 * ? * * *)", fetchVerifiedAccounts);
 
 // aws.cloudwatch.onSchedule("sbf-tweets-snapshot", "cron(33 * * * ? *)", fetchTweets);
