@@ -271,10 +271,10 @@ const endpoint = new awsx.apigateway.API("verifiend", {
             eventHandler: async (event) => {
                 console.log(`Getting sample diffs`);
 
-                const added_all = await readS3FileAsJson(VERIFIED_ACCOUNTS_BUCKET.get(), '10_71-added');
+                const added_all = await readS3FileAsJson(VERIFIED_ACCOUNTS_BUCKET.get(), '10_257-added');
                 // read 10 random entries from file and return them as a sample
                 const added = getRandomSample(added_all, DIFF_SAMPLE_SIZE);
-                const deleted_all = await readS3FileAsJson(VERIFIED_ACCOUNTS_BUCKET.get(), '10_71-deleted');
+                const deleted_all = await readS3FileAsJson(VERIFIED_ACCOUNTS_BUCKET.get(), '10_257-deleted');
                 const deleted = getRandomSample(deleted_all, DIFF_SAMPLE_SIZE);
                 const result = {
                     added: added,
@@ -298,10 +298,12 @@ const endpoint = new awsx.apigateway.API("verifiend", {
 
 export const restEndpoint = endpoint.url;
 
+// Disabling because twitter apis are no longer free
+/*
 aws.cloudwatch.onSchedule("verified-following-snapshot", "cron(36 * * * ? *)", rawCount);
 
 aws.cloudwatch.onSchedule("verified-following-dump-to-s3", "cron(55 * * * ? *)", dumpCountsToS3);
 
 aws.cloudwatch.onSchedule("verified-following-details-snapshot", "cron(0,15,30,45 * ? * * *)", fetchVerifiedAccounts);
-
+*/
 // aws.cloudwatch.onSchedule("sbf-tweets-snapshot", "cron(33 * * * ? *)", fetchTweets);
