@@ -15,12 +15,13 @@ export const DAILY_COUNTS_FILE_NAME = 'daily.json';
 export const MERGED_SUFFIX = 'merged';
 export const ADDED_SUFFIX = 'added';
 export const DELETED_SUFFIX = 'deleted';
+export const DIFF_SAMPLE_SIZE = 10;
 
 const verifiedAccounts = new aws.s3.Bucket("verifiedAccounts");
-export const verifiedAccountsBucket = verifiedAccounts.bucket;
+export const VERIFIED_ACCOUNTS_BUCKET = verifiedAccounts.bucket;
 
 async function fetchVerifiedAccounts() {
-    const queryInfo = getQueryInfo(verifiedAccountsBucket.get());
+    const queryInfo = getQueryInfo(VERIFIED_ACCOUNTS_BUCKET.get());
     return pagedFetch(queryInfo);
 }
 
@@ -128,7 +129,7 @@ async function dumpCountsToS3() {
 }
 
 async function diffBatches(id1: string, id2: string) {
-    const bucketName = verifiedAccountsBucket.get();
+    const bucketName = VERIFIED_ACCOUNTS_BUCKET.get();
     const f1 = `${id1}-${MERGED_SUFFIX}`;
     const f2 = `${id2}-${MERGED_SUFFIX}`;
 
@@ -141,8 +142,12 @@ async function diffBatches(id1: string, id2: string) {
     await writeToS3(bucketName, `${id1}_${id2}-${ADDED_SUFFIX}`, JSON.stringify(addedValues));
 }
 
+function getRandomSample(arr: any[], sampleSize: number) {
+    return _.sampleSize(arr, sampleSize);
+}
+
 async function mergeBatch(id: string) {
-    const bucketName = verifiedAccountsBucket.get();
+    const bucketName = VERIFIED_ACCOUNTS_BUCKET.get();
     const prefix = `${id}-`;
 
     const s3 = new aws.sdk.S3();
@@ -257,6 +262,34 @@ const endpoint = new awsx.apigateway.API("verifiend", {
                         "Access-Control-Allow-Methods": "GET"
                     },
                     body: JSON.stringify(latest),
+                };
+            },
+        },
+        {
+            path: "/diffs",
+            method: "GET",
+            eventHandler: async (event) => {
+                console.log(`Getting sample diffs`);
+
+                const added_all = await readS3FileAsJson(VERIFIED_ACCOUNTS_BUCKET.get(), '10_71-added');
+                // read 10 random entries from file and return them as a sample
+                const added = getRandomSample(added_all, DIFF_SAMPLE_SIZE);
+                const deleted_all = await readS3FileAsJson(VERIFIED_ACCOUNTS_BUCKET.get(), '10_71-deleted');
+                const deleted = getRandomSample(deleted_all, DIFF_SAMPLE_SIZE);
+                const result = {
+                    added: added,
+                    deleted: deleted
+                }
+
+                console.log(`Finished`);
+                return {
+                    statusCode: 200,
+                    headers: {
+                        "Access-Control-Allow-Headers": "Content-Type",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET"
+                    },
+                    body: JSON.stringify(result),
                 };
             },
         }
